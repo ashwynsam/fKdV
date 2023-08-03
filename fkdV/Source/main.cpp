@@ -1,7 +1,8 @@
 #include <AMReX_PlotFileUtil.H>
 #include <AMReX_ParmParse.H>
 #include "myfunc.H"
-
+#include <vector>
+#include <complex>
 
 using namespace amrex;
 
@@ -66,7 +67,25 @@ void main_main ()
     // force function parameters
     Real A_coef;
     Real G_coef;
+   
+    // wave number vector k
+    std::vector<double> k(n_cell);
+
+    // Initialize coeffecients to simplify the time marching scheme
+    std::complex<double> img = 0.0 + 1.0i;
+    std::complex<double> C1;
+    std::complex<double> C2;
+    std::complex<double> C3;
+    std::complex<double> C4;
     
+
+    // Generate array 'k' with values -N/2 to N/2 - 1 and apply fftshift
+    for (int i = 0; i < N; ++i) {
+        k[i] = (2 * M_PI / (2 * L)) * (i - N / 2);
+    }
+
+    // FFTSHIFT on array 'k'
+    std::rotate(k.begin(), k.begin() + N / 2, k.end());
 
     // inputs parameters
     {
@@ -107,14 +126,18 @@ void main_main ()
 	pp.get("G_coef", G_coef);
 
     }
+ 
+    // Generate array 'k' with values -N/2 to N/2 - 1 and apply fftshift
+    for (int i = 0; i < n_cell; ++i) {
+        k[i] = (2 * M_PI / (2 * prob_hi[0])) * (i - n_cell / 2);
+    }
+
+    // FFTSHIFT on array 'k'
+    std::rotate(k.begin(), k.begin() + n_cell / 2, k.end());
 
     // **********************************
     // SIMULATION SETUP
 
-    // make BoxArray and Geometry
-    // ba will contain a list of boxes that cover the domain
-    // geom contains information such as the physical domain size,
-    //               number of points in the domain, and periodicity
     BoxArray ba;
     Geometry geom;
 
@@ -225,7 +248,12 @@ void main_main ()
 
             // advance the data by dt
             amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            { Unp1(i,j,k) = 0.; // updatestep
+            {
+	    	C1 = 1. / (1 - dt * beta * img * pow(k[i],3.) ) ;
+		C2 = 1. + dt * beta * img * pow(k[i], 3.0);
+		C3 = -dt * alpha * img * k[i];
+		C4 = 2. * gamma * dt * img * k[i];
+	    	// Unp1(i,j,k) = ifft(C1 .* (C2 .* fft(U_nm1) + C3 .* (fft(U_n.^2))  + C4 .* fft(forceterm(t,x))) );; // updatestep pseudo code
             });
         }
 

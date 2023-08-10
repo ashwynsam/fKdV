@@ -1,8 +1,10 @@
 #include <AMReX_PlotFileUtil.H>
 #include <AMReX_ParmParse.H>
 #include "myfunc.H"
-#include <vector>
-#include <complex>
+#include "FFT_Functions.H"
+#include <AMReX_Print.H>
+#include <AMReX_MultiFab.H> //For the method most common at time of writing
+#include <AMReX_MFParallelFor.H> //For the second newer method
 
 using namespace amrex;
 
@@ -16,46 +18,47 @@ int main (int argc, char* argv[])
     return 0;
 }
 
-double sech(double x) {
+Real sech(Real x) {
     return 1.0 / std::cosh(x);
 }
 
-double U_analy(double x, double t, double A_coef, double G_coef) {
-    double a1 = std::sqrt(A_coef/6.); 
-    double lmd = - (2. * A_coef - 3. * G_coef) / 6.;
-    double U = A_coef * std::pow(sech(a1 * (x + lmd * t)), 2.);
+Real U_analy(Real x, Real t, Real A_coef, Real G_coef) {
+    Real a1 = std::sqrt(A_coef/6.); 
+    Real lmd = - (2. * A_coef - 3. * G_coef) / 6.;
+    Real U = A_coef * std::pow(sech(a1 * (x + lmd * t)), 2.);
     return U;
 }
 
-double forceterm(double x, double t, double A_coef, double G_coef) {
-	double a1 = std::sqrt(A_coef/6.);
-	double lmd = - (2. * A_coef - 3. * G_coef) / 6.;
-	double f = A_coef * G_coef * std::pow(sech(a1 * (x + lmd * t)), 2.);
+Real forceterm(Real x, Real t, Real A_coef, Real G_coef) {
+	Real a1 = std::sqrt(A_coef/6.);
+	Real lmd = - (2. * A_coef - 3. * G_coef) / 6.;
+	Real f = A_coef * G_coef * std::pow(sech(a1 * (x + lmd * t)), 2.);
 	return f;
+}
+
+void complex_mult(Real a, Real b, Real c, Real d, Real& out_real, Real& out_img){
+	out_real = a * c - b * d;
+	out_img = a * d + b * c;
 }
 
 void main_main ()
 {
+    Real total_step_strt_time = ParallelDescriptor::second();
 
     // **********************************
     // SIMULATION PARAMETERS
 
-    // number of cells on each side of the domain
     amrex::GpuArray<int, 3> n_cell; // Number of cells in each dimension
 
-    // size of each box (or grid)
     int max_grid_size;
 
-    // total steps in simulation
     int nsteps; // I need to make sure that this is an integer
 
     // how often to write a plotfile
     int plot_int;
 
-    // time step
     Real dt;
 
-    // domain dimensions
     amrex::GpuArray<amrex::Real, 3> prob_lo; // physical lo coordinate
     amrex::GpuArray<amrex::Real, 3> prob_hi; // physical hi coordinate
 
@@ -68,24 +71,6 @@ void main_main ()
     Real A_coef;
     Real G_coef;
    
-    // wave number vector k
-    std::vector<double> k(n_cell);
-
-    // Initialize coeffecients to simplify the time marching scheme
-    std::complex<double> img = 0.0 + 1.0i;
-    std::complex<double> C1;
-    std::complex<double> C2;
-    std::complex<double> C3;
-    std::complex<double> C4;
-    
-
-    // Generate array 'k' with values -N/2 to N/2 - 1 and apply fftshift
-    for (int i = 0; i < N; ++i) {
-        k[i] = (2 * M_PI / (2 * L)) * (i - N / 2);
-    }
-
-    // FFTSHIFT on array 'k'
-    std::rotate(k.begin(), k.begin() + N / 2, k.end());
 
     // inputs parameters
     {
@@ -127,13 +112,6 @@ void main_main ()
 
     }
  
-    // Generate array 'k' with values -N/2 to N/2 - 1 and apply fftshift
-    for (int i = 0; i < n_cell; ++i) {
-        k[i] = (2 * M_PI / (2 * prob_hi[0])) * (i - n_cell / 2);
-    }
-
-    // FFTSHIFT on array 'k'
-    std::rotate(k.begin(), k.begin() + n_cell / 2, k.end());
 
     // **********************************
     // SIMULATION SETUP
@@ -154,20 +132,27 @@ void main_main ()
     // Break up boxarray "ba" into chunks no larger than "max_grid_size" along a direction
     ba.maxSize(max_grid_size);
 
+    ba.define(domain);
+
+    // Break up boxarray "ba" into chunks no larger than "max_grid_size" along a direction
+    ba.maxSize(max_grid_size);
+
     // This defines the physical box, [-L,L] in each direction.
     RealBox real_box({AMREX_D_DECL( prob_lo[0], prob_lo[1], prob_lo[2])},
                      {AMREX_D_DECL( prob_hi[0], prob_hi[1], prob_hi[2])});
     // periodic in all direction
-    Array<int,AMREX_SPACEDIM> is_periodic{AMREX_D_DECL(1,1,1)};
+    Array<int,AMREX_SPACEDIM> is_periodic{AMREX_D_DECL(0,0,0)};
 
     // This defines a Geometry object
     geom.define(domain, real_box, CoordSys::cartesian, is_periodic);
+    //geom.define(domain, real_box, CoordSys::cartesian);
+    // geom(domain, &real_box);
 
     // extract dx from the geometry object
     GpuArray<Real,AMREX_SPACEDIM> dx = geom.CellSizeArray();
 
     // Nghost = number of ghost cells for each array
-    int Nghost = 1;
+    int Nghost = 0;
 
     // Ncomp = number of components for each array
     int Ncomp = 1;
@@ -179,12 +164,32 @@ void main_main ()
     MultiFab U_nm1(ba, dm, Ncomp, Nghost); //U_n-1  
     MultiFab U_n(ba, dm, Ncomp, Nghost);   //U_n
     MultiFab U_np1(ba, dm, Ncomp, Nghost); //U_n+1
+    MultiFab U_n_sq(ba, dm, Ncomp, Nghost); //U_n.^2
+    MultiFab U_n_sq_real(ba, dm, Ncomp, Nghost);// The multi fabs with _real or _img are the multifabs where the fft data is stored
+    MultiFab U_n_sq_img(ba, dm, Ncomp, Nghost);
+    MultiFab U_nm1_real(ba, dm, Ncomp, Nghost);
+    MultiFab U_nm1_img(ba, dm, Ncomp, Nghost);
+    MultiFab U_np1_real(ba, dm, Ncomp, Nghost);
+    MultiFab U_np1_img(ba, dm, Ncomp, Nghost);
+    MultiFab F_t_real(ba, dm, Ncomp, Nghost);
+    MultiFab F_t_img(ba, dm, Ncomp, Nghost);
     MultiFab U_exact(ba, dm, Ncomp, Nghost); //U_exact  
     MultiFab F_t(ba, dm, Ncomp, Nghost); //Force term 
     MultiFab Plt(ba, dm, 3, 0); //plotting of numerical solution, exact solution, and force term 
 
     // time = starting time in the simulation
     Real time = 0.0;
+
+    // define k
+    amrex::Vector<amrex::Real> k_x(n_cell[0]);
+
+    // Generate array 'k' with values -N/2 to N/2 - 1 and apply fftshift
+    for (int i = 0; i < n_cell[0]; ++i) {
+        k_x[i] = (2 * M_PI) / (2 * prob_hi[0])  * (i - n_cell[0] / 2);
+    }
+
+    // FFTSHIFT on array 'k'
+    std::rotate(k_x.begin(), k_x.begin() + n_cell[0] / 2, k_x.end());
 
     // **********************************
     // INITIALIZE DATA
@@ -220,7 +225,7 @@ void main_main ()
     if (plot_int > 0)
     {
         int step = 0;
-        const std::string& pltfile = amrex::Concatenate("plt",step,5); //here 5 is the number of digits in the name of the file
+        const std::string& pltfile = amrex::Concatenate("plt",step,7); //here 5 is the number of digits in the name of the file
         MultiFab::Copy(Plt, U_n, 0, 0, 1, 0);
         MultiFab::Copy(Plt, U_exact , 0, 1, 1, 0);
         MultiFab::Copy(Plt, F_t, 0, 2, 1, 0);	
@@ -231,31 +236,76 @@ void main_main ()
     time = time + dt;
 
     //Time advancement 
-    for (int step = 2; step <= nsteps; ++step)
+    for (int step = 1; step <= nsteps; ++step)
     {
         // fill periodic ghost cells
-        U_nm1.FillBoundary(geom.periodicity());
-	U_n.FillBoundary(geom.periodicity()); 
+        //U_nm1.FillBoundary(geom.periodicity());
+	//U_n.FillBoundary(geom.periodicity()); 
 
+	// Square U_n amd calculate Force term
+	for(amrex::MFIter mfi(U_n); mfi.isValid(); ++mfi){
+            const amrex::Box& bx = mfi.validbox();
+            const amrex::Array4<amrex::Real>& Un = U_n.array(mfi);
+            const amrex::Array4<amrex::Real>& Un_sq = U_n_sq.array(mfi);
+            const amrex::Array4<amrex::Real>& Ft = F_t.array(mfi);
+	
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                Un_sq(i,j,k) = std::pow(Un(i,j,k) , 2.) ;
+
+		Real x = prob_lo[0]+ (i+0.5) * dx[0];
+		Ft(i,j,k) = forceterm(x, time, A_coef, G_coef);
+            });
+
+        }
+
+	// Compute FFTs
+	ComputeForwardFFT(U_nm1, U_nm1_real, U_nm1_img, geom, 1);
+	ComputeForwardFFT(U_n_sq, U_n_sq_real, U_n_sq_img, geom, 1);
+	ComputeForwardFFT(F_t, F_t_real, F_t_img, geom, 1);
+	
         // loop over boxes
         for ( MFIter mfi(U_nm1); mfi.isValid(); ++mfi )
         {
             const Box& bx = mfi.validbox();
 
-            const Array4<Real>& Unm1 = U_nm1.array(mfi);
-	    const Array4<Real>& Un = U_n.array(mfi);
-            const Array4<Real>& Unp1 = U_np1.array(mfi);
+            const Array4<Real>& Unm1_real = U_nm1_real.array(mfi);
+	    const Array4<Real>& Unm1_img = U_nm1_img.array(mfi);
+            const Array4<Real>& Unp1_real = U_np1_real.array(mfi);
+            const Array4<Real>& Unp1_img = U_np1_img.array(mfi);
+            const Array4<Real>& Un_sq_real = U_n_sq_real.array(mfi);
+            const Array4<Real>& Un_sq_img = U_n_sq_img.array(mfi);
+            const Array4<Real>& Ft_real = F_t_real.array(mfi);
+            const Array4<Real>& Ft_img = F_t_img.array(mfi);
+            const Array4<Real>& Uexact = U_exact.array(mfi);
 
             // advance the data by dt
             amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-	    	C1 = 1. / (1 - dt * beta * img * pow(k[i],3.) ) ;
-		C2 = 1. + dt * beta * img * pow(k[i], 3.0);
-		C3 = -dt * alpha * img * k[i];
-		C4 = 2. * gamma * dt * img * k[i];
-	    	// Unp1(i,j,k) = ifft(C1 .* (C2 .* fft(U_nm1) + C3 .* (fft(U_n.^2))  + C4 .* fft(forceterm(t,x))) );; // updatestep pseudo code
+	    	//Simplifying coeffecients
+	    	Real z = dt * beta * std::pow(k_x[i], 3.);
+		Real C1_real = 1. / (1 + std::pow(z, 2.));
+		Real C1_img = z / (1 + std::pow(z, 2.));
+		Real C2_real = 1.;
+		Real C2_img = z;
+		Real C3_img = -dt * alpha * k_x[i];
+		Real C4_img = 2 * gamma * dt * k_x[i];
+		
+		Real termUnm1_real, termUnm1_img, termUnsq_real, termUnsq_img, termFt_real, termFt_img, termSum_real, termSum_img, termFull_real, termFull_img;
+		complex_mult(C2_real, C2_img, Unm1_real(i,j,k), Unm1_img(i,j,k), termUnm1_real, termUnm1_img);
+		complex_mult(0., C3_img, Un_sq_real(i,j,k), Un_sq_img(i,j,k), termUnsq_real, termUnsq_img);
+		complex_mult(0., C4_img, Ft_real(i,j,k), Ft_img(i,j,k), termFt_real, termFt_img);
+		termSum_real = termUnm1_real + termUnsq_real + termFt_real;
+		termSum_img = termUnm1_img + termUnsq_img + termFt_img;
+		complex_mult(C1_real, C1_img, termSum_real, termSum_img, termFull_real, termFull_img);
+		Unp1_real(i,j,k) = termFull_real;
+		Unp1_img(i,j,k) = termFull_img;
+    			    
             });
         }
+
+	//Compte Inverse FFT
+	ComputeInverseFFT(U_np1, U_np1_real, U_np1_img , n_cell, geom);
 
         // update time
         time = time + dt;
@@ -265,17 +315,20 @@ void main_main ()
 	MultiFab::Copy(U_n, U_np1, 0, 0, 1, 0);
 
         // Tell the I/O Processor to write out which step we're doing
-        amrex::Print() << "Advanced step " << step << "\n";
-
-        // Write a plotfile of the current data (plot_int was defined in the inputs file)
-        if (plot_int > 0 && step%plot_int == 0)
-        {
-            const std::string& pltfile = amrex::Concatenate("plt",step,5); //here 5 is the number of digits in the name of the file
-            MultiFab::Copy(Plt, U_nm1, 0, 0, 1, 0);
-            MultiFab::Copy(Plt, U_n, 0, 1, 1, 0);
-            WriteSingleLevelPlotfile(pltfile, Plt, {"Unm1","Un"}, geom, time, step);
+        //amrex::Print() << "Advanced step " << step << "\n";
+        
+	if (plot_int > 0 && step % plot_int == 0) {
+		
+            // Write a plotfile of the current data (plot_int was defined in the inputs file)
+            const std::string& pltfile = amrex::Concatenate("plt",step,7); //here 5 is the number of digits in the name of the file
+            MultiFab::Copy(Plt, U_n, 0, 0, 1, 0);
+            MultiFab::Copy(Plt, U_exact , 0, 1, 1, 0);
+            MultiFab::Copy(Plt, F_t, 0, 2, 1, 0);
+            WriteSingleLevelPlotfile(pltfile, Plt, {"Un","Uexact","Ft"}, geom, time, step);
         }
     }
+    Real total_step_stop_time = ParallelDescriptor::second() - total_step_strt_time;
+    ParallelDescriptor::ReduceRealMax(total_step_stop_time);
+
+    amrex::Print() << "Total run time " << total_step_stop_time << " seconds\n";
 }
-
-

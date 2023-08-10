@@ -2,7 +2,7 @@
 AMREX_HOME ?= ../../amrex
 
 DEBUG        = FALSE
-USE_MPI      = FALSE
+USE_MPI      = TRUE
 USE_OMP      = FALSE
 COMP         = gnu
 DIM          = 1
@@ -16,3 +16,9 @@ INCLUDE_LOCATIONS += ../Source
 include $(AMREX_HOME)/Src/Base/Make.package
 
 include $(AMREX_HOME)/Tools/GNUMake/Make.rules
+
+ifeq ($(USE_CUDA),TRUE)
+  LIBRARIES += -lcufft
+else
+  LIBRARIES += -L$(FFTW_DIR) -lfftw3_mpi -lfftw3
+endif

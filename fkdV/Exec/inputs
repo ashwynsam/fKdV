@@ -1,13 +1,13 @@
 ### Input Parameters ### 
 
-n_cell = 1024 128 128
+n_cell = 1024 8 8
 prob_lo = -100. -100.0 -100.0 
 prob_hi = 100. 100.0 100.0
-max_grid_size = 128
+max_grid_size = 1024
 time = 1.0
 dt = 1.e-4
-nsteps = 1
-plot_int = 100
+nsteps = 10000
+plot_int = 10000
 
 
 # PDE parameters
